@@ -4,7 +4,12 @@ import (
 	"context"
 	"fmt"
 	"testing"
+
+	"github.com/pkg/errors"
 )
+
+// TODO 1:函数链实现重试 retry
+// TODO 2:实现注入函数判断是否需要执行
 
 func metricsHandler(chain *HandlerChain, handler Handler) error {
 	//t := time.Now().UnixNano()
@@ -15,7 +20,7 @@ func metricsHandler(chain *HandlerChain, handler Handler) error {
 }
 
 func controllerHandler(ctx *Context, state FuncState) ControlFlag {
-	if ctx.state == Abort {
+	if ctx.state == StateAbort {
 		return Break
 	}
 	if state > ctx.state {
@@ -24,48 +29,61 @@ func controllerHandler(ctx *Context, state FuncState) ControlFlag {
 	return GoOn
 }
 
-func func1(ctx *Context) (ErrorHandler, error) {
+func func1(ctx *Context) error {
 	//fmt.Printf("test 1\n")
-	return nil, nil
+	return errors.New("1")
 }
 
-func func2(ctx *Context) (ErrorHandler, error) {
+func func2(ctx *Context) error {
 	//fmt.Printf("test 2\n")
-	return nil, nil
+	return errors.New("2")
 }
 
-func func3(ctx *Context) (ErrorHandler, error) {
-	//fmt.Printf("test 3\n")
-	return nil, nil
+func func3(ctx *Context) error {
+	v, _ := ctx.Get("k")
+	if v.(int) < 3 {
+		ctx.Set("k", v.(int)+1)
+		fmt.Printf("test 3 %d\n", v.(int))
+		return RetryThenAbort(ctx, errors.New("3"))
+	}
+	fmt.Printf("stop retry, test 3 %d\n", v.(int))
+	return errors.New("3")
 }
 
-func func4(ctx *Context) (ErrorHandler, error) {
-	//fmt.Printf("test 4\n")
-	return nil, nil
+func func4(ctx *Context) error {
+
+	return errors.New("4")
 }
 
-func funcAbort(ctx *Context) (ErrorHandler, error) {
-	ctx.SetState(Abort)
+func funcAbort(ctx *Context) error {
+	ctx.SetState(StateAbort)
 	fmt.Printf("test abort\n")
-	return nil, nil
+	return nil
 }
 
 // 从中间状态开始执行
 func Test(t *testing.T) {
 
 	ctx := context.Background()
-	chain := NewHandlerChain(ctx).WithState(3)
+	chain := NewHandlerChain(ctx).WithState(1)
 	//chain.RegisterControllerHandler(controllerHandler)
 	chain.RegisterMetricsHandler(metricsHandler)
 
 	chain.Use(func1, WithSign("func1"), WithState(1))
 	chain.Use(func2, WithSign("func2"), WithState(2))
 	chain.Use(func3, WithSign("func3"), WithState(3))
-	chain.Use(func4, WithSign("func4"), WithState(4))
+	chain.Use(func4, WithSign("func4"), WithState(4), WithRetryCount(10))
 
 	err := chain.Run()
 	if err != nil {
 		fmt.Printf("err:%v\n", err)
+		e, _ := chain.errs.Pop()
+		fmt.Printf("err:%v\n", e)
+		e, _ = chain.errs.Pop()
+		fmt.Printf("err:%v\n", e)
+		e, _ = chain.errs.Pop()
+		fmt.Printf("err:%v\n", e)
+		//fmt.Printf("err:%v\n", chain.ErrorAll())
 	}
 }
 
@@ -109,7 +127,7 @@ func Test3(t *testing.T) {
 // 测试走 metrics
 func Test4(t *testing.T) {
 	ctx := context.Background()
-	chain := NewHandlerChain(ctx).WithState(1)
+	chain := NewHandlerChain(ctx)
 	//chain.RegisterControllerHandler(controllerHandler)
 	chain.RegisterMetricsHandler(metricsHandler)
 
@@ -117,6 +135,25 @@ func Test4(t *testing.T) {
 	chain.Use(func2, WithSign("func2"), WithState(2))
 	chain.Use(func3, WithSign("func3"), WithState(4))
 	chain.Use(func4, WithSign("func4"), WithState(5))
+
+	err := chain.Run()
+	if err != nil {
+		fmt.Printf("err:%v\n", err)
+	}
+}
+
+// 测试 retry
+func Test5(t *testing.T) {
+	ctx := context.Background()
+	chain := NewHandlerChain(ctx)
+	chain.Set("k", 1)
+	//chain.RegisterControllerHandler(controllerHandler)
+	chain.RegisterMetricsHandler(metricsHandler)
+
+	chain.Use(func1, WithSign("func1"), WithState(1))
+	chain.Use(func2, WithSign("func2"), WithState(2))
+	chain.Use(func3, WithSign("func3"), WithState(3), WithRetryCount(5))
+	chain.Use(func4, WithSign("func4"), WithState(4))
 
 	err := chain.Run()
 	if err != nil {
@@ -146,24 +183,12 @@ func Benchmark1(b *testing.B) {
 func Benchmark2(b *testing.B) {
 	for n := 0; n < b.N; n++ {
 		ctx := Init(context.Background())
-		errHandler, err := func1(ctx)
+		err := func1(ctx)
+		err = func2(ctx)
+		err = func3(ctx)
+		err = func4(ctx)
 		if err != nil {
-			_ = errHandler(ctx, err)
-		}
-
-		errHandler, err = func2(ctx)
-		if err != nil {
-			_ = errHandler(ctx, err)
-		}
-
-		errHandler, err = func3(ctx)
-		if err != nil {
-			_ = errHandler(ctx, err)
-		}
-
-		errHandler, err = func4(ctx)
-		if err != nil {
-			_ = errHandler(ctx, err)
+			fmt.Printf("err:%v\n", err)
 		}
 	}
 }

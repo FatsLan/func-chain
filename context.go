@@ -8,8 +8,9 @@ import (
 )
 
 const (
-	Abort     FuncState = (1 << bits.UintSize) / -2
-	Undefined FuncState = (1<<bits.UintSize)/-2 + 1
+	StateUndefined      FuncState = (1 << bits.UintSize) / -2
+	StateAbort          FuncState = (1<<bits.UintSize)/-2 + 1
+	StateRetryThenAbort FuncState = (1<<bits.UintSize)/-2 + 2
 )
 
 type FuncState int
@@ -24,8 +25,20 @@ type Context struct {
 func Init(ctx context.Context) *Context {
 	return &Context{
 		Context: ctx,
-		state:   Undefined,
+		state:   StateUndefined,
 	}
+}
+
+func (c *Context) Abort() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.state = StateAbort
+}
+
+func (c *Context) RetryThenAbort() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.state = StateRetryThenAbort
 }
 
 func (c *Context) SetState(state FuncState) {
@@ -38,6 +51,12 @@ func (c *Context) GetState() FuncState {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.state
+}
+
+func (c *Context) ClearState() {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	c.state = StateUndefined
 }
 
 func (c *Context) Set(key string, value interface{}) {

@@ -13,7 +13,6 @@ type HandlerChain struct {
 	*Context
 	errs              *ErrorStack
 	handlers          []Handler
-	errorHandler      ErrorHandler
 	metricsHandler    MetricsHandler
 	controllerHandler ControllerHandler
 }
@@ -43,18 +42,21 @@ func (handlerChain *HandlerChain) Use(f FuncHandler, opts ...Options) {
 	handlerChain.handlers = append(handlerChain.handlers, handler)
 }
 
-// RegisterErrorHandler register the common ErrorHandler in HandlerChain
-func (handlerChain *HandlerChain) RegisterErrorHandler(handler ErrorHandler) {
-	handlerChain.errorHandler = handler
+// Abort handle error info
+func Abort(ctx *Context, err error) error {
+	ctx.Abort()
+	return err
 }
 
+// RetryThenAbort retry Handler, if can't get except response after retry count reduce to 0, handle error info
+func RetryThenAbort(ctx *Context, err error) error {
+	ctx.RetryThenAbort()
+	return err
+}
+
+// RegisterMetricsHandler register the common MetricsHandler in HandlerChain
 func (handlerChain *HandlerChain) RegisterMetricsHandler(handler MetricsHandler) {
 	handlerChain.metricsHandler = handler
-}
-
-// RegisterBizHandler RegisterBizHandler
-func (handlerChain *HandlerChain) RegisterBizHandler(handler ErrorHandler) {
-	handlerChain.errorHandler = handler
 }
 
 func (handlerChain *HandlerChain) RegisterControllerHandler(handler ControllerHandler) {
@@ -73,21 +75,27 @@ func (handlerChain *HandlerChain) Run() error {
 
 Loop:
 	for _, h := range handlerChain.handlers {
+		retry := h.options.GetRetryCount()
+
+		handlerChain.do(h)
+
 		flag := doDefaultController(handlerChain, &h.options.state)
+		// 如果 func 需要 retry，那么这里需要重定向到上一个 handlers
+		for flag == Retry && retry > 0 {
+			handlerChain.ClearState()
+			handlerChain.do(h)
+			flag = doDefaultController(handlerChain, &h.options.state)
+			retry--
+		}
 
 		switch flag {
-		case Break:
+		case Retry, Break:
 			break Loop
 		case Continue:
 			continue
 		default:
 		}
 
-		if handlerChain.metricsHandler != nil {
-			_ = handlerChain.metricsHandler(handlerChain, h)
-		} else {
-			handlerChain.doDefault(h)
-		}
 	}
 
 	err, _ := handlerChain.PopError()
@@ -102,20 +110,8 @@ func (handlerChain *HandlerChain) doDefault(h Handler) {
 	handlerChain.handleError(h.funcHandler(handlerChain.Context))
 }
 
-func (handlerChain *HandlerChain) handleError(handler ErrorHandler, err error) {
+func (handlerChain *HandlerChain) handleError(err error) {
 	if err == nil {
-		return
-	}
-
-	// 先执行函数绑定的回调函数
-	if handler != nil {
-		handlerChain.errs.Push(handler(handlerChain.Context, err))
-		return
-	}
-
-	// 再执行 chain 注册的公共回调函数
-	if handlerChain.errorHandler != nil {
-		handlerChain.errs.Push(handlerChain.errorHandler(handlerChain.Context, err))
 		return
 	}
 
@@ -135,8 +131,12 @@ func (handlerChain *HandlerChain) ErrorAll() []error {
 }
 
 func doDefaultController(handlerChain *HandlerChain, state *FuncState) ControlFlag {
-	if handlerChain.Context.GetState() == Abort {
+	if handlerChain.Context.GetState() == StateAbort {
 		return Break
+	}
+
+	if handlerChain.Context.GetState() == StateRetryThenAbort {
+		return Retry
 	}
 
 	if state != nil {
@@ -147,4 +147,12 @@ func doDefaultController(handlerChain *HandlerChain, state *FuncState) ControlFl
 		handlerChain.Context.SetState(*state)
 	}
 	return GoOn
+}
+
+func (handlerChain *HandlerChain) do(h Handler) {
+	if handlerChain.metricsHandler != nil {
+		_ = handlerChain.metricsHandler(handlerChain, h)
+	} else {
+		handlerChain.doDefault(h)
+	}
 }
